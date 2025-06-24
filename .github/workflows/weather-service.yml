@@ -1,0 +1,52 @@
+# .github/workflows/weather-service.yml
+# This file makes your weather service run automatically every 30 minutes
+
+name: 🌤️ Weather Service - Athens to Thinger.io
+
+on:
+  schedule:
+    # Runs every 30 minutes, 24/7/365
+    - cron: '*/30 * * * *'
+  
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  update-weather:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15  # Prevent hanging
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'  # Cache pip dependencies for faster runs
+    
+    - name: 📦 Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+    
+    - name: 🌤️ Run Weather Update Service
+      env:
+        # These will be set from your GitHub repository secrets
+        THINGER_TOKEN: ${{ secrets.THINGER_TOKEN }}
+        THINGER_USERNAME: ${{ secrets.THINGER_USERNAME }}
+        THINGER_SERVER: ${{ secrets.THINGER_SERVER }}
+        WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+      run: |
+        echo "🚀 Starting Weather Service..."
+        python weather_github_runner.py
+    
+    - name: 📊 Upload Logs (on failure)
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: weather-service-logs
+        path: |
+          *.log
+        retention-days: 7
