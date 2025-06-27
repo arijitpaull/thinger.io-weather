@@ -5,7 +5,7 @@ import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Set
 
 
 # Configure logging
@@ -72,7 +72,7 @@ def get_athens_weather() -> Optional[Dict]:
                 return None
 
 def check_device_exists(device_id: str) -> bool:
-    """Check if a device exists with retry logic."""
+    """Check if a device exists and has OutTemp resource."""
     headers = {
         "Authorization": f"Bearer {THINGER_TOKEN}",
         "Accept": "application/json"
@@ -80,16 +80,38 @@ def check_device_exists(device_id: str) -> bool:
     
     url = f"{THINGER_SERVER}/v1/users/{THINGER_USERNAME}/devices/{device_id}/OutTemp"
     
-    for attempt in range(2):  # Only 2 attempts for device check
-        try:
-            response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-            return response.status_code == 200
-        except Exception as e:
-            logger.debug(f"Device check attempt {attempt + 1} failed for {device_id}: {e}")
-            if attempt < 1:
-                time.sleep(1)
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+def discover_available_devices(device_range: List[str]) -> Set[str]:
+    """Discover which devices are available in the full range."""
+    logger.info(f"🔍 Discovering available devices from {len(device_range)} potential devices...")
     
-    return False
+    available_devices = set()
+    
+    # Use threading to check devices faster
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        # Submit all device checks
+        future_to_device = {
+            executor.submit(check_device_exists, device_id): device_id 
+            for device_id in device_range
+        }
+        
+        # Process results as they complete
+        for future in as_completed(future_to_device):
+            device_id = future_to_device[future]
+            try:
+                if future.result(timeout=15):
+                    available_devices.add(device_id)
+                    logger.info(f"✅ Found device: {device_id}")
+            except Exception as e:
+                logger.debug(f"⚠️ Device check failed for {device_id}: {e}")
+    
+    logger.info(f"🎯 Discovery complete: {len(available_devices)} devices available")
+    return available_devices
 
 def send_to_thinger_api(device_id: str, temperature: float) -> bool:
     """Send temperature data to a specific Thinger.io device with retry logic."""
@@ -128,17 +150,11 @@ def send_to_thinger_api(device_id: str, temperature: float) -> bool:
     return False
 
 def process_device_batch(devices: List[str], temperature: float) -> dict:
-    """Process a batch of devices with improved error handling."""
-    results = {"success": 0, "failed": 0, "not_found": 0}
+    """Process a batch of available devices (no need to check existence again)."""
+    results = {"success": 0, "failed": 0}
     
     for device_id in devices:
-        # Check device existence first
-        if not check_device_exists(device_id):
-            logger.debug(f"⚠️ {device_id} does not exist")
-            results["not_found"] += 1
-            continue
-        
-        # Send data
+        # Send data directly (we already know these devices exist)
         if send_to_thinger_api(device_id, temperature):
             results["success"] += 1
         else:
@@ -148,6 +164,22 @@ def process_device_batch(devices: List[str], temperature: float) -> dict:
         time.sleep(0.1)
     
     return results
+
+def save_device_cache(available_devices: Set[str]):
+    """Save discovered devices to a cache file for debugging."""
+    try:
+        cache_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "devices": sorted(list(available_devices)),
+            "count": len(available_devices)
+        }
+        
+        with open('device_cache.json', 'w') as f:
+            json.dump(cache_data, f, indent=2)
+        
+        logger.info(f"💾 Device cache saved: {len(available_devices)} devices")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to save device cache: {e}")
 
 def create_heartbeat_file():
     """Create a heartbeat file to track last successful run."""
@@ -159,11 +191,11 @@ def create_heartbeat_file():
         logger.warning(f"⚠️ Failed to create heartbeat file: {e}")
 
 def main():
-    """Main function with comprehensive error handling and logging."""
+    """Main function with dynamic device discovery."""
     start_time = datetime.now(timezone.utc)
     
     logger.info("=" * 70)
-    logger.info(f"🚀 Weather Update Service Started")
+    logger.info(f"🚀 Weather Update Service Started (Dynamic Discovery)")
     logger.info(f"⏰ Execution Time: {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     logger.info("=" * 70)
     
@@ -182,11 +214,25 @@ def main():
     logger.info(f"🔧 Server: {THINGER_SERVER}")
     logger.info(f"👤 Username: {THINGER_USERNAME}")
     
-    # Generate device list
-    devices = [f"{DEVICE_PREFIX}{i}" for i in range(DEVICE_START, DEVICE_END + 1)]
-    logger.info(f"📡 Target devices: {len(devices)} ({DEVICE_PREFIX}{DEVICE_START} to {DEVICE_PREFIX}{DEVICE_END})")
+    # Generate full device range to search
+    all_possible_devices = [f"{DEVICE_PREFIX}{i}" for i in range(DEVICE_START, DEVICE_END + 1)]
+    logger.info(f"📡 Searching range: {len(all_possible_devices)} devices ({DEVICE_PREFIX}{DEVICE_START} to {DEVICE_PREFIX}{DEVICE_END})")
     
-    # Get weather data
+    # Step 1: Discover available devices
+    available_devices = discover_available_devices(all_possible_devices)
+    
+    if not available_devices:
+        logger.error("❌ No available devices found in the specified range. Aborting.")
+        return
+    
+    # Convert to sorted list for consistent ordering
+    available_device_list = sorted(list(available_devices))
+    logger.info(f"📋 Available devices: {', '.join(available_device_list)}")
+    
+    # Save device discovery results
+    save_device_cache(available_devices)
+    
+    # Step 2: Get weather data
     logger.info("🌤️ Fetching weather data...")
     weather = get_athens_weather()
     
@@ -199,21 +245,21 @@ def main():
     logger.info(f"💧 Humidity: {weather['humidity']}%")
     logger.info(f"☁️ Conditions: {weather['description']}")
     
-    # Process devices in batches
-    logger.info(f"📤 Starting updates for {len(devices)} devices...")
+    # Step 3: Send data to all available devices
+    logger.info(f"📤 Starting updates for {len(available_device_list)} available devices...")
     
-    batch_size = 8  # Reduced batch size for better reliability
+    batch_size = 8
     total_success = 0
     total_failed = 0
-    total_not_found = 0
     
-    with ThreadPoolExecutor(max_workers=3) as executor:  # Reduced workers
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = []
         
-        for i in range(0, len(devices), batch_size):
-            batch = devices[i:i + batch_size]
+        # Process available devices in batches
+        for i in range(0, len(available_device_list), batch_size):
+            batch = available_device_list[i:i + batch_size]
             batch_num = i // batch_size + 1
-            logger.info(f"🔄 Submitting batch {batch_num} ({len(batch)} devices)")
+            logger.info(f"🔄 Processing batch {batch_num} ({len(batch)} devices): {', '.join(batch)}")
             
             future = executor.submit(process_device_batch, batch, temperature)
             futures.append(future)
@@ -221,13 +267,12 @@ def main():
         # Process results as they complete
         for future in as_completed(futures):
             try:
-                result = future.result(timeout=30)  # 30 second timeout per batch
+                result = future.result(timeout=30)
                 total_success += result["success"]
                 total_failed += result["failed"]
-                total_not_found += result["not_found"]
             except Exception as e:
                 logger.error(f"❌ Batch processing error: {e}")
-                total_failed += batch_size  # Assume all failed in this batch
+                total_failed += batch_size
     
     # Calculate execution time
     end_time = datetime.now(timezone.utc)
@@ -241,24 +286,24 @@ def main():
     logger.info(f"📊 EXECUTION SUMMARY")
     logger.info("=" * 70)
     logger.info(f"🌡️ Athens Temperature: {temperature}°C ({weather['description']})")
-    logger.info(f"📡 Total Devices: {len(devices)}")
+    logger.info(f"🔍 Devices Searched: {len(all_possible_devices)} ({DEVICE_PREFIX}{DEVICE_START} to {DEVICE_PREFIX}{DEVICE_END})")
+    logger.info(f"📱 Available Devices: {len(available_device_list)}")
     logger.info(f"✅ Successful Updates: {total_success}")
     logger.info(f"❌ Failed Updates: {total_failed}")
-    logger.info(f"⚠️ Devices Not Found: {total_not_found}")
-    logger.info(f"📈 Success Rate: {(total_success/len(devices)*100):.1f}%")
+    logger.info(f"📈 Success Rate: {(total_success/len(available_device_list)*100):.1f}%" if available_device_list else "N/A")
     logger.info(f"⏱️ Execution Time: {execution_time:.2f} seconds")
     logger.info("=" * 70)
     
-    if total_not_found > 0:
-        logger.info(f"ℹ️ Note: {total_not_found} devices need to be created in Thinger.io")
+    # Success criteria: Based on available devices only
+    if available_device_list:
+        success_rate = (total_success / len(available_device_list)) * 100
+        if success_rate < 80:
+            logger.error(f"❌ Low success rate ({success_rate:.1f}%) on available devices")
+            exit(1)
+        else:
+            logger.info(f"🎯 Excellent! {success_rate:.1f}% success rate on available devices")
     
-    # Set exit code based on success rate
-    success_rate = (total_success / len(devices)) * 100
-    if success_rate < 50:
-        logger.error("❌ Low success rate detected - this may indicate a systemic issue")
-        exit(1)
-    
-    logger.info("🎯 Weather service execution completed!")
+    logger.info("🎯 Weather service execution completed successfully!")
 
 if __name__ == "__main__":
     main()
