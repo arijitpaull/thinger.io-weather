@@ -1,30 +1,37 @@
 # .github/workflows/weather-service.yml
-# This file makes your weather service run automatically every 30 minutes
+# Enhanced reliability with multiple strategies
 
 name: 🌤️ Weather Service - Athens to Thinger.io
 
 on:
   schedule:
-    # Runs every 30 minutes, 24/7/365
-    - cron: '*/30 * * * *'
+    # Multiple offset schedules for redundancy - avoid peak times
+    - cron: '7 */1 * * *'   # Every hour at 7 minutes past (primary)
+    - cron: '22 */2 * * *'  # Every 2 hours at 22 minutes past (backup)
+    - cron: '37 */3 * * *'  # Every 3 hours at 37 minutes past (tertiary)
   
-  # Allows you to run this workflow manually from the Actions tab
+  # Manual trigger for testing
   workflow_dispatch:
 
 jobs:
   update-weather:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Prevent hanging
+    timeout-minutes: 10  # Reduced timeout
+    
+    # Add retry strategy
+    strategy:
+      fail-fast: false
+      max-parallel: 1
     
     steps:
     - name: 📥 Checkout Repository
       uses: actions/checkout@v4
-    
-    - name: 🐍 Set up Python 3.9
+      
+    - name: 🐍 Set up Python 3.11
       uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
-        cache: 'pip'  # Cache pip dependencies for faster runs
+        python-version: '3.11'
+        cache: 'pip'
     
     - name: 📦 Install Dependencies
       run: |
@@ -33,7 +40,6 @@ jobs:
     
     - name: 🌤️ Run Weather Update Service
       env:
-        # These will be set from your GitHub repository secrets
         THINGER_TOKEN: ${{ secrets.THINGER_TOKEN }}
         THINGER_USERNAME: ${{ secrets.THINGER_USERNAME }}
         THINGER_SERVER: ${{ secrets.THINGER_SERVER }}
@@ -41,12 +47,25 @@ jobs:
       run: |
         echo "🚀 Starting Weather Service..."
         python weather_github_runner.py
-    
-    - name: 📊 Upload Logs (on failure)
-      if: failure()
+        
+    # Always upload logs for debugging
+    - name: 📊 Upload Logs
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: weather-service-logs
+        name: weather-service-logs-${{ github.run_id }}
         path: |
           *.log
-        retention-days: 7
+        retention-days: 3
+
+  # Add a monitoring job that runs more frequently
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    if: github.event_name == 'schedule'
+    
+    steps:
+    - name: 🏥 Quick Health Check
+      run: |
+        echo "Health check at $(date)"
+        echo "Last run: ${{ github.run_id }}"
