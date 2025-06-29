@@ -6,7 +6,7 @@ name: 🌤️ Weather Service - Athens to Thinger.io
 on:
   schedule:
     # Multiple offset schedules for redundancy - avoid peak times
-    - cron: '7 */1 * * *'   # Every hour at 7 minutes past (primary)
+    - cron: '7 */1 * * *0'   # Every hour at 7 minutes past (primary)
     - cron: '22 */2 * * *'  # Every 2 hours at 22 minutes past (backup)
     - cron: '37 */3 * * *'  # Every 3 hours at 37 minutes past (tertiary)
   
